@@ -1,0 +1,96 @@
+name: Record
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "m3u8 link. Leave it as ask to send the link in Telegram (keeps it hidden if the repo is public)"
+        required: false
+        default: "ask"
+      minutes:
+        description: "Stop after N minutes (0 = until you press Stop)"
+        default: "0"
+      idle_min:
+        description: "Stop the job when the stream sends no data for N minutes (saves GitHub minutes, 0 = off)"
+        default: "10"
+      stream_type:
+        description: "Link type: auto (finds out itself), hls (.m3u8) or ts (direct MPEG-TS stream)"
+        type: choice
+        options:
+          - auto
+          - hls
+          - ts
+        default: auto
+      quality:
+        description: "Quality when the link is a master playlist: best / mid / low (use mid or low if the source is slow)"
+        type: choice
+        options:
+          - best
+          - mid
+          - low
+        default: best
+      workers:
+        description: "Parallel segment downloads (16 is a good max, up to 64)"
+        default: "16"
+      name:
+        description: "File name"
+        default: "ClipByNaim"
+      part_mb:
+        description: "New file every N MB (4000 = 4 GB, whether that takes 1 hour or 2)"
+        default: "4000"
+      part_min:
+        description: "Optional: also split every N minutes (0 = off, split by size only)"
+        default: "0"
+      referer:
+        description: "Optional: website the link is played on (only if the link needs it)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: write      # lets a very long recording continue in a new run
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      PYTHONUNBUFFERED: "1"
+      TG_TOKEN: ${{ secrets.TG_TOKEN }}
+      TG_CHAT: ${{ secrets.TG_CHAT }}
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.run_id }}
+      URL: ${{ inputs.url }}
+      MINUTES: ${{ inputs.minutes }}
+      IDLE_STOP_MIN: ${{ inputs.idle_min }}
+      STREAM_TYPE: ${{ inputs.stream_type }}
+      QUALITY: ${{ inputs.quality }}
+      WORKERS: ${{ inputs.workers }}
+      NAME: ${{ inputs.name }}
+      PART_MB: ${{ inputs.part_mb }}
+      PART_MIN: ${{ inputs.part_min }}
+      REFERER: ${{ inputs.referer }}
+      OUT_DIR: /mnt/rec
+      MP4_DIR: rec_mp4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: Use the second disk for recording
+        run: sudo mkdir -p /mnt/rec && sudo chown "$USER" /mnt/rec
+      - name: Network tuning (bigger TCP buffers, helps far away servers)
+        continue-on-error: true
+        run: |
+          sudo sysctl -w net.core.rmem_max=67108864 net.core.wmem_max=67108864 || true
+          sudo sysctl -w net.ipv4.tcp_rmem="4096 262144 67108864" net.ipv4.tcp_wmem="4096 65536 67108864" || true
+          sudo sysctl -w net.ipv4.tcp_congestion_control=bbr || true
+          sudo sysctl -w net.ipv4.tcp_slow_start_after_idle=0 || true
+      - name: GitHub speed test (for your information)
+        continue-on-error: true
+        run: |
+          curl -s -m 20 -o /dev/null -w "GitHub download speed: %{speed_download} bytes/sec (12500000 = 100 Mbps)\n" "https://speed.cloudflare.com/__down?bytes=100000000" || true
+      - name: Record
+        run: python3 gh_record.py
+      - name: Upload leftovers if cancelled
+        if: always()
+        run: python3 gh_record.py finish
